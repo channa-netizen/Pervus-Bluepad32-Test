@@ -133,6 +133,49 @@ print("PATCH 3 OK: pairing logging")
 
 
 # ---------------------------------------------------------
+# PATCH 4
+# Ignore SP526's BLE GameMacro personality
+#
+# The real controller is already connected through
+# Bluetooth Classic as "Pro Controller".
+#
+# SP526 later advertises a second BLE personality named
+# "GameMacro". Bluepad32 currently treats that as another
+# HID device and attempts a BLE/HOGP connection.
+#
+# Parse the advertisement before device creation and reject
+# GameMacro completely.
+# ---------------------------------------------------------
+
+old = """    adv_event_get_data(packet, &appearance, name);
+
+    if (appearance != UNI_BT_HID_APPEARANCE_GAMEPAD && appearance != UNI_BT_HID_APPEARANCE_JOYSTICK &&
+"""
+
+new = """    adv_event_get_data(packet, &appearance, name);
+
+    // SP526 exposes a second BLE personality named "GameMacro"
+    // while its real Switch-compatible controller is already
+    // connected over Bluetooth Classic.
+    //
+    // Do not let Bluepad32 create/connect a BLE HID device for it.
+    if (strcmp(name, "GameMacro") == 0) {
+        logi("[PERVUS BLE] IGNORING GameMacro BLE personality addr=%s\\n",
+             bd_addr_to_str(addr));
+        return;
+    }
+
+    if (appearance != UNI_BT_HID_APPEARANCE_GAMEPAD && appearance != UNI_BT_HID_APPEARANCE_JOYSTICK &&
+"""
+
+if old not in text:
+    raise SystemExit("ERROR: GameMacro insertion point not found")
+
+text = text.replace(old, new, 1)
+print("PATCH 4 OK: GameMacro BLE personality ignored")
+
+
+# ---------------------------------------------------------
 # SAVE + VERIFY
 # ---------------------------------------------------------
 
@@ -144,9 +187,9 @@ count = verify.count("[PERVUS BLE]")
 
 print(f"\nPERVUS diagnostic markers found: {count}")
 
-if count < 4:
+if count < 5:
     raise SystemExit(
-        f"ERROR: expected at least 4 PERVUS markers, found {count}"
+        f"ERROR: expected at least 5 PERVUS markers, found {count}"
     )
 
 if "device->hids_cid != 0 && device->hids_cid != 0xffff" not in verify:
@@ -158,7 +201,14 @@ if "[PERVUS BLE] DUP ADV" not in verify:
 if "[PERVUS BLE] PAIRING_COMPLETE" not in verify:
     raise SystemExit("ERROR: PAIRING_COMPLETE verification failed")
 
+if '[PERVUS BLE] IGNORING GameMacro BLE personality' not in verify:
+    raise SystemExit("ERROR: GameMacro ignore verification failed")
+
+if 'strcmp(name, "GameMacro") == 0' not in verify:
+    raise SystemExit("ERROR: GameMacro name filter verification failed")
+
 print("\n======================================")
 print(" PERVUS BLUEPAD32 PATCH SUCCESSFUL")
+print(" GameMacro BLE personality BLOCKED")
 print("======================================")
 print(src)
