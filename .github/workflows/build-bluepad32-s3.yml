@@ -1,43 +1,140 @@
 name: Build patched Bluepad32 S3 diagnostic
+
 on:
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+
     steps:
-      - uses: actions/checkout@v4
-      - name: Checkout Bluepad32 Arduino template 4.1.0
+      - name: Checkout diagnostic repo
+        uses: actions/checkout@v4
+
+      - name: Checkout Bluepad32 template 4.1.0
         uses: actions/checkout@v4
         with:
           repository: ricardoquesada/esp-idf-arduino-bluepad32-template
           ref: 4.1.0
           path: bp32
           submodules: recursive
-      - name: Patch
+
+      - name: Show source layout
         run: |
-          cp patch_bluepad32.py bp32/
+          echo "=== Bluepad32 source locations ==="
+          find bp32 -type f -name "uni_bt_le.c" -print
+
+          echo ""
+          echo "=== Bluepad32 directories ==="
+          find bp32 -type d -name "bluepad32" -print
+
+      - name: Apply Pervus patch
+        run: |
+          set -e
+
+          cp patch_bluepad32.py bp32/patch_bluepad32.py
+
           cd bp32
+
+          echo "=== Running patch ==="
           python3 patch_bluepad32.py
-          grep -n "PERVUS BLE" components/bluepad32/bt/uni_bt_le.c
+
+          echo ""
+          echo "=== VERIFYING PATCH ==="
+
+          PATCHED_FILES=$(grep -rl "\[PERVUS BLE\]" . \
+            --include="uni_bt_le.c" || true)
+
+          if [ -z "$PATCHED_FILES" ]; then
+            echo "ERROR: PERVUS BLE patch was NOT found."
+            exit 1
+          fi
+
+          echo "Patch found in:"
+          echo "$PATCHED_FILES"
+
+          echo ""
+          grep -rn "\[PERVUS BLE\]" . \
+            --include="uni_bt_le.c"
+
       - name: Build ESP32-S3
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: v4.4.7
           target: esp32s3
           path: bp32
-          command: idf.py set-target esp32s3 && idf.py build
-      - name: Collect
-        if: always()
+          command: |
+            idf.py set-target esp32s3
+            idf.py build
+
+      - name: Locate Bluepad32 library
         run: |
-          mkdir -p artifact/libs
-          cp bp32/components/bluepad32/bt/uni_bt_le.c artifact/uni_bt_le.PERVUS.c 2>/dev/null || true
-          find bp32/build -type f -name '*.a' -print > artifact/static-libraries.txt 2>/dev/null || true
-          while IFS= read -r f; do cp "$f" artifact/libs/; done < artifact/static-libraries.txt
-          cp bp32/build/*.elf bp32/build/*.bin bp32/build/*.map artifact/ 2>/dev/null || true
-      - name: Upload
-        if: always()
+          set -e
+
+          echo "=== Searching for libbluepad32.a ==="
+
+          find bp32 -type f -name "libbluepad32.a" -print
+
+          LIB=$(find bp32 -type f -name "libbluepad32.a" | head -n 1)
+
+          if [ -z "$LIB" ]; then
+            echo ""
+            echo "ERROR: libbluepad32.a WAS NOT PRODUCED."
+            echo ""
+            echo "All .a files that WERE produced:"
+            find bp32 -type f -name "*.a" -print || true
+            exit 1
+          fi
+
+          echo ""
+          echo "FOUND:"
+          echo "$LIB"
+
+          echo "BLUEPAD32_LIB=$LIB" >> "$GITHUB_ENV"
+
+      - name: Verify compiled diagnostic strings
+        run: |
+          set -e
+
+          echo "=== Checking compiled library ==="
+          echo "$BLUEPAD32_LIB"
+
+          strings "$BLUEPAD32_LIB" | grep "PERVUS BLE" || {
+            echo ""
+            echo "ERROR: Library exists but PERVUS BLE strings"
+            echo "are NOT present in compiled binary."
+            exit 1
+          }
+
+          echo ""
+          echo "SUCCESS: Patched strings are inside libbluepad32.a"
+
+      - name: Prepare artifact
+        run: |
+          set -e
+
+          mkdir -p artifact
+
+          cp "$BLUEPAD32_LIB" artifact/libbluepad32.a
+
+          PATCHED_SOURCE=$(grep -rl "\[PERVUS BLE\]" bp32 \
+            --include="uni_bt_le.c" | head -n 1)
+
+          cp "$PATCHED_SOURCE" artifact/uni_bt_le.PERVUS.c
+
+          echo "Compiled from:" > artifact/BUILD_INFO.txt
+          echo "$PATCHED_SOURCE" >> artifact/BUILD_INFO.txt
+          echo "" >> artifact/BUILD_INFO.txt
+          echo "Library:" >> artifact/BUILD_INFO.txt
+          echo "$BLUEPAD32_LIB" >> artifact/BUILD_INFO.txt
+
+          echo ""
+          echo "=== FINAL ARTIFACT ==="
+          ls -lh artifact/
+
+      - name: Upload verified library
         uses: actions/upload-artifact@v4
         with:
-          name: pervus-bluepad32-s3-diagnostic
-          path: artifact
+          name: pervus-bluepad32-s3-VERIFIED
+          path: artifact/
+          if-no-files-found: error
