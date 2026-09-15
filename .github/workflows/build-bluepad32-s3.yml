@@ -1,0 +1,43 @@
+name: Build patched Bluepad32 S3 diagnostic
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout Bluepad32 Arduino template 4.1.0
+        uses: actions/checkout@v4
+        with:
+          repository: ricardoquesada/esp-idf-arduino-bluepad32-template
+          ref: 4.1.0
+          path: bp32
+          submodules: recursive
+      - name: Patch
+        run: |
+          cp patch_bluepad32.py bp32/
+          cd bp32
+          python3 patch_bluepad32.py
+          grep -n "PERVUS BLE" components/bluepad32/bt/uni_bt_le.c
+      - name: Build ESP32-S3
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v4.4.7
+          target: esp32s3
+          path: bp32
+          command: idf.py set-target esp32s3 && idf.py build
+      - name: Collect
+        if: always()
+        run: |
+          mkdir -p artifact/libs
+          cp bp32/components/bluepad32/bt/uni_bt_le.c artifact/uni_bt_le.PERVUS.c 2>/dev/null || true
+          find bp32/build -type f -name '*.a' -print > artifact/static-libraries.txt 2>/dev/null || true
+          while IFS= read -r f; do cp "$f" artifact/libs/; done < artifact/static-libraries.txt
+          cp bp32/build/*.elf bp32/build/*.bin bp32/build/*.map artifact/ 2>/dev/null || true
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pervus-bluepad32-s3-diagnostic
+          path: artifact
